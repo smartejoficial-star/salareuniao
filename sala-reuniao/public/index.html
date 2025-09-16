@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Salas de Reunião</title>
+  <link rel="icon" type="image/png" href="favicon.png">
+
+  <!-- FullCalendar -->
+  <link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
+
+  <!-- Firebase (compat) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore-compat.js"></script>
+
+  <!-- jsPDF + AutoTable -->
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
+  <link rel="stylesheet" href="index.css">
+
+</head>
+<body>
+  <header>  
+    <div class="controls">
+      <div class="group">
+        <label for="roomFilter" class="small">Filtrar sala</label>
+        <select id="roomFilter">
+          <option value="__all">Todas</option>
+          <option>Sala dos Conselhos</option>
+          <option>Sala de Reunião</option>
+        </select>
+      </div>
+      <div class="group">
+        <label for="monthPicker" class="small">Ir para mês/ano</label>
+        <input id="monthPicker" type="month">
+      </div>
+      <div class="group">
+        <label class="small" style="visibility:hidden">.</label>
+        <button id="exportPdfBtn" class="btn ghost" title="Exportar eventos visíveis">Exportar PDF</button>
+      </div>
+    </div>
+  </header>
+
+  <div id="calendarWrap"><div id="calendar"></div></div>
+
+  <!-- Modal -->
+  <div id="backdrop" class="modal-backdrop">
+    <div class="modal">
+      <div class="content">
+        <h3 id="modalTitle" style="margin:0 0 6px 0;">Novo evento</h3>
+        <div class="small" id="modalDate" style="color:#667085; font-size:12px;">Data</div>
+
+        <div class="form-grid">
+          <div>
+            <label>Título</label>
+            <input id="titleInput" placeholder="Ex.: Reunião de Projeto">
+          </div>
+          <div>
+            <label>Sala</label>
+            <select id="roomInput">
+              <option>Sala dos Conselhos</option>
+              <option>Sala de Reunião</option>
+            </select>
+          </div>
+          <div>
+            <label>Agendado para</label>
+            <input id="requestedByInput" placeholder="Nome do solicitante">
+          </div>
+
+          <div class="full">
+            <div class="dates-grid">
+              <div>
+                <label>Data início</label>
+                <input id="startDateInput" type="date">
+              </div>
+              <div>
+                <label>Data fim</label>
+                <input id="endDateInput" type="date">
+              </div>
+            </div>
+          </div>
+
+          <div class="full">
+            <div class="times-grid">
+              <div>
+                <label>Início</label>
+                <input id="startTimeInput" type="time" value="09:00">
+              </div>
+              <div>
+                <label>Término</label>
+                <input id="endTimeInput" type="time" value="12:00">
+              </div>
+              <div>
+                <label>Dia inteiro?</label>
+                <div class="allday"><input type="checkbox" id="allDayInput"><span class="hint">Marque para bloquear o dia todo</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="full">
+            <label>Descrição (opcional)</label>
+            <textarea id="descInput" placeholder="Detalhes do evento..."></textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="btn ghost" id="cancelBtn">Cancelar</button>
+        <button class="btn danger" id="deleteBtn" style="display:none;">Eliminar</button>
+        <button class="btn primary" id="saveBtn">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal de confirmação -->
+  <div id="confirmBackdrop" class="modal-backdrop">
+    <div class="modal" style="max-width:400px;">
+      <div class="content">
+        <h3 style="margin:0 0 12px 0;">Confirmação</h3>
+        <p id="confirmMessage" style="color:#475467;font-size:14px;">
+          Tens certeza que deseja eliminar este evento?
+        </p>
+      </div>
+      <div class="actions">
+        <button class="btn ghost" id="confirmCancel">Cancelar</button>
+        <button class="btn danger" id="confirmOk">Eliminar</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /* Toast */
+    const toast=(type,title,msg,timeout=4200)=>{
+      const t=document.createElement('div');
+      t.className=`toast ${type}`;
+      t.innerHTML=`<div><div class="title">${title}</div><div class="msg">${msg}</div></div>`;
+      document.body.appendChild(t);
+      const hide=()=>{t.style.opacity='0';setTimeout(()=>t.remove(),250);};
+      setTimeout(hide,timeout);
+      t.addEventListener('click',hide);
+    };
+
+    /* Firebase */
+    const firebaseConfig={
+      apiKey:"AIzaSyBfX0LfLMS1pBkdIacdNJ4aPGyTFCbOb4o",
+      authDomain:"powerbiapp-dc227.firebaseapp.com",
+      projectId:"powerbiapp-dc227",
+      storageBucket:"powerbiapp-dc227.firebasestorage.app",
+      messagingSenderId:"944472617416",
+      appId:"1:944472617416:web:cc6ae6dd768deca504d0fd",
+      measurementId: "G-SF5YRWMBHT"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db=firebase.firestore();
+    try{db.settings({ignoreUndefinedProperties:true});}catch(e){}
+
+    /* coleção das salas */
+    const COL="salareuniao-events";
+
+    /* mapa de cores por sala */
+    const roomColors={
+      "Sala dos Conselhos":"#0a66c2", // azul
+      "Sala de Reunião":"#f59e0b"     // amarelo
+    };
+
+    /* Refs */
+    const backdrop=document.getElementById('backdrop');
+    const modalTitle=document.getElementById('modalTitle');
+    const modalDate=document.getElementById('modalDate');
+    const titleInput=document.getElementById('titleInput');
+    const descInput=document.getElementById('descInput');
+    const roomInput=document.getElementById('roomInput');
+    const requestedByInput=document.getElementById('requestedByInput');
+    const allDayInput=document.getElementById('allDayInput');
+    const startTimeInput=document.getElementById('startTimeInput');
+    const endTimeInput=document.getElementById('endTimeInput');
+    const startDateInput=document.getElementById('startDateInput');
+    const endDateInput=document.getElementById('endDateInput');
+    const cancelBtn=document.getElementById('cancelBtn');
+    const saveBtn=document.getElementById('saveBtn');
+    const deleteBtn=document.getElementById('deleteBtn');
+    const roomFilter=document.getElementById('roomFilter');
+    const monthPicker=document.getElementById('monthPicker');
+    const exportPdfBtn=document.getElementById('exportPdfBtn');
+    const params = new URLSearchParams(window.location.search);
+    const userRole = params.get("role"); 
+
+    let currentDateISO=null;
+    let currentEventId=null;
+
+    if (userRole !== "admin") {
+      document.getElementById("saveBtn").style.display = "none";
+      document.getElementById("deleteBtn").style.display = "none";
+    }
+
+    const pad2=n=>String(n).padStart(2,'0');
+    const toISODate=d=>`${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+    const toISO=(dateISO,hm)=>`${dateISO}T${hm}:00`;
+    const fmtHM=d=>new Date(d).toTimeString().slice(0,5);
+    const addDays=(iso,n)=>{const [Y,M,D]=iso.split('-').map(Number);const dt=new Date(Y,M-1,D+n);return toISODate(dt);};
+    const eachDate=(s,e)=>{const out=[];let cur=s;while(cur<=e){out.push(cur);cur=addDays(cur,1);}return out;};
+    const normalizeDate=s=>!s?s:(String(s).includes('T')?String(s).split('T')[0]:String(s));
+
+    function openModal({dateISO,eventData}){
+      backdrop.style.display='flex';
+      const dISO = eventData ? eventData.start.slice(0,10) : normalizeDate(dateISO);
+      currentDateISO=dISO;
+      currentEventId=eventData?.id||null;
+
+      modalTitle.textContent=currentEventId?'Editar evento':'Novo evento';
+      modalDate.textContent=new Date(dISO).toLocaleDateString('pt-PT',{weekday:'long',day:'2-digit',month:'long',year:'numeric'});
+
+      startDateInput.value = dISO;
+      endDateInput.value   = eventData ? (eventData.end ? eventData.end.slice(0,10) : dISO) : dISO;
+
+      titleInput.value=eventData?.title||'';
+      descInput.value=eventData?.description||'';
+      requestedByInput.value=eventData?.requestedBy||'';
+      roomInput.value=eventData?.room||'Sala dos Conselhos';
+
+      if(eventData){
+        const ad=!!eventData.allDay;
+        allDayInput.checked=ad;
+        startTimeInput.disabled=ad;
+        endTimeInput.disabled=ad;
+        if(!ad){
+          const toHM=d=>new Date(d).toISOString().slice(11,16);
+          startTimeInput.value=toHM(eventData.start);
+          endTimeInput.value=toHM(eventData.end||eventData.start);
+        }else{
+          startTimeInput.value='09:00';
+          endTimeInput.value='12:00';
+        }
+      }else{
+        allDayInput.checked=false;
+        startTimeInput.disabled=false;
+        endTimeInput.disabled=false;
+        startTimeInput.value='09:00';
+        endTimeInput.value='12:00';
+      }
+
+      deleteBtn.style.display=currentEventId?'inline-block':'none';
+    }
+    function closeModal(){
+      backdrop.style.display='none';
+      currentEventId=null;
+      currentDateISO=null;
+      titleInput.value='';
+      descInput.value='';
+      requestedByInput.value='';
+    }
+    cancelBtn.onclick=closeModal;
+
+    /* Calendar */
+    const calendarEl=document.getElementById('calendar');
+    const calendar=new FullCalendar.Calendar(calendarEl,{
+      height:'100%',
+      initialView:'dayGridMonth',
+      locale:'pt',
+      headerToolbar:{left:'prev,next today', center:'title', right:'dayGridMonth,timeGridWeek,timeGridDay'},
+
+      dateClick:(info)=>openModal({dateISO: info.dateStr}),
+
+      eventClick:async(info)=>{
+        const snap=await db.collection(COL).doc(info.event.id).get();
+        if(snap.exists) openModal({eventData:{id:snap.id,...snap.data()}});
+      },
+
+      events: async (info, successCb, failureCb) => {
+        try {
+          const startISO = info.startStr.slice(0,10);
+          const endISO   = info.endStr.slice(0,10);
+          let q = db.collection(COL)
+            .where('start','>=',startISO)
+            .where('start','<=',endISO);
+          const rf = roomFilter.value;
+          if (rf && rf !== '__all') q = q.where('room','==',rf);
+          const snap = await q.get();
+
+          const add1d = iso => {
+            const [Y,M,D]=iso.split('-').map(Number);
+            return toISODate(new Date(Y,M-1,D+1));
+          };
+
+          const list = snap.docs.map(d => {
+            const data = d.data();
+            const base = {
+              id: d.id,
+              title: data.title || '(sem título)',
+              room: data.room,
+              requestedBy: data.requestedBy || '',
+              color: roomColors[data.room] || "#999"
+            };
+            if (data.allDay) {
+              const s = data.date;
+              const e = add1d(data.date);
+              return { ...base, start: s, end: e, allDay: true };
+            } else {
+              return { ...base, start: data.start, end: data.end || data.start, allDay: false };
+            }
+          });
+
+          successCb(list);
+        } catch (e) {
+          console.error('Erro ao carregar eventos:', e);
+          failureCb(e);
+        }
+      }
+    });
+    calendar.render();
+
+    roomFilter.addEventListener('change',()=>calendar.refetchEvents());
+    window.addEventListener('resize',()=>calendar.updateSize());
+
+    /* Guardar evento */
+    saveBtn.onclick=async()=>{
+      if(userRole!=="admin"){
+        toast('err','Permissão negada','Você não tem permissão para criar/editar.');
+        return;
+      }
+      const d=startDateInput.value;
+      if(!d){toast('warn','Data início','Escolha a data de início.');return;}
+
+      const payload={
+        title:(titleInput.value||'').trim(),
+        description:(descInput.value||'').trim(),
+        requestedBy:(requestedByInput.value||'').trim(),
+        room:roomInput.value,
+        allDay:allDayInput.checked,
+        start:allDayInput.checked?d+'T00:00:00':toISO(d,startTimeInput.value),
+        end:allDayInput.checked?d+'T23:59:59':toISO(d,endTimeInput.value),
+        date:d,
+        updatedAt:new Date().toISOString()
+      };
+
+      try{
+        if(currentEventId){
+          await db.collection(COL).doc(currentEventId).update(payload);
+          toast('ok','Alterado','Evento atualizado.');
+        }else{
+          payload.createdAt=new Date().toISOString();
+          await db.collection(COL).add(payload);
+          toast('ok','Guardado','Evento criado.');
+        }
+        calendar.refetchEvents();
+        closeModal();
+      }catch(e){
+        console.error(e);
+        toast('err','Erro',String(e.message||e));
+      }
+    };
+  </script>
+</body>
+</html>
